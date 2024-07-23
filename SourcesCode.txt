@@ -1,0 +1,212 @@
+library(lubridate) 
+library(ggplot2) 
+library(tidyverse) 
+library(dplyr) 
+library(reshape2)
+library(forecast) 
+library(zoo)
+library(ggfortify) 
+library(tseries)
+library(TSstudio)
+library(tsutils)
+library(lmtest)
+library("imputeTS")
+
+# Read data from CSV file into data frame
+tempdata <- read.csv("my_tmp_1901-2021.csv")
+
+# Convert from Wide format to Long format. Month column labels in file were renamed to
+# "M01"..."M12". These will become values in the "month" column in the long format.
+# Renaming to "M01"..."M12" will allow sorting by chronological order.
+tempdata_long <- melt(tempdata, id.vars=c("year"), measure.vars=c("M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M09", "M10", "M11", "M12"), variable.name="month", value.name="avgtemp")
+# Sort by Year and Month
+tempdata_long <- tempdata_long[ order(tempdata_long$year, tempdata_long$month), ]
+
+# Create TS object from reformatted data
+tempdata_ts <- ts(data = tempdata_long[,3], frequency = 12, start = c(1901,1), end = c(2021, 12)) 
+
+# Display TS data
+tempdata_ts
+
+# Subset the TS data to years 2012 - 2021
+tempdata_ts <- window(tempdata_ts, start=c(2012,1))
+
+ggplot_na_distribution(tempdata_ts)
+
+# Plot TS for 2012 - 2021
+autoplot(tempdata_ts) + ylab("Average Temperature") + xlab("Month-Year") + scale_x_date(date_labels = '%Y', breaks = '1 year', minor_breaks = '2 month') + theme_bw() + ggtitle("Malaysia Average Temperatures 2012 - 2021")
+
+# Decompose TS into components
+tscomponents <- stl(tempdata_ts, s.window = 'periodic')
+
+# Display TS components
+autoplot(tscomponents) + theme_bw() + scale_x_date(date_labels = '%b - %Y', breaks = '1 year', minor_breaks = '2 month') + ggtitle("TS Components")
+
+# Calculate Seasonal and Trend strengths
+Tc <- trendcycle(tscomponents) 
+Sc <- seasonal(tscomponents) 
+Rc <- remainder(tscomponents)
+TrSt <- round(max(0,1 - (var(Rc)/var(Tc + Rc))),1)
+SnSt <- round(max(0,1 - (var(Rc)/var(Sc + Rc))),1)
+data.frame('Trend Strength' = TrSt , 'Seasonal Strength' = SnSt)
+
+# Display Seasonal Plot
+seasonplot(tempdata_ts, year.labels = TRUE, col = 1:13, main = "Seasonal Plot", ylab= "Average Temperature (celsius)")
+
+#Seasonal Sub-Series Plot
+seasplot(tempdata_ts, outplot = 3, trend = FALSE,
+         main = "Seasonal Subseries Plot", ylab= "Average Temperature (celsius)")
+
+#Seasonal Boxplot
+seasplot(tempdata_ts, outplot = 2, trend = FALSE,
+         main = "Seasonal Box Plot", ylab= "Average Temperature (celsius)")
+
+# Split TS data into Training and Test sets (80%-20% split)
+# Training set 2012 to 2019
+tempdata_train <- window(tempdata_ts, start = c(2012,1), end = c(2019,12))
+
+# Test set 2020 to 2021 (2 years)
+tempdata_test <- window(tempdata_ts, start = c(2020,1), end = c(2021,12))
+
+# Returns the number of Seasonal Differences required to make TS stationary
+nsdiffs(tempdata_train)
+
+# Plot ACF and PACF for training set (display 8 yrs)
+par(mfrow=c(1,2))
+acf(tempdata_train, lag.max = 96)
+pacf(tempdata_train, lag.max = 96)
+
+# Perform 1 Seasonal Difference (frequency of 12) on training set
+tempdata_train_d12 <- diff(tempdata_train, 12)
+
+# tempdata_train_d24 <- diff(tempdata_train_d12, 12)
+
+# Display TS plot after taking 1 Seasonal Difference
+autoplot(tempdata_train_d12) + ylab("Temperature") + xlab("Month-Year") + 
+  scale_x_date(date_labels = '%b-%Y', breaks = '1 year', minor_breaks = '2 month') + theme_bw() + ggtitle("Malaysia Average Temperatures 2012 to 2019 - After First Seasonal Difference")
+
+par(mfrow=c(1,2))
+acf(tempdata_train_d12, lag.max = 96)
+pacf(tempdata_train_d12, lag.max = 96)
+
+# Perform 1 Non-Seasonal Difference (1 lag) on TS to stabilize variance
+tempdata_train_d12_1 <- diff(tempdata_train_d12, 1)
+
+# Display TS plot after taking 1 Seasonal Difference and 1 Non-Seasonal Difference
+autoplot(tempdata_train_d12_1) + ylab("Temperature") + xlab("Month-Year") + 
+  scale_x_date(date_labels = '%b-%Y', breaks = '1 year', minor_breaks = '2 month') + theme_bw() + ggtitle("Malaysia Average Temperatures 2012 to 2019 - After First Seasonal Difference And 1 Non-Seasonal Difference")  
+
+# Plot ACF and PACF to see the difference
+par(mfrow=c(1,2))
+acf(tempdata_train_d12_1, lag.max = 96)
+pacf(tempdata_train_d12_1, lag.max = 96)
+
+#############################################  1. SARIMA MODEL #############################################################
+
+# Set Arima (p,d,q) and (P,D,Q) parameters. Based on analysis of ACF and PACF, a suitable
+# model may be (0,1,1) (0,1,1). Construct additional Arima models with parameters with  
+# small differences in parameter values. Note that D and d should be 1 since we performed 
+# differencing for both seasonal and non-seasonal.
+fit1 <- arima(tempdata_train, order = c(0,1,1), seasonal = c(0,1,1))
+fit2 <- arima(tempdata_train, order = c(1,1,1), seasonal = c(0,1,1))
+fit3 <- arima(tempdata_train, order = c(0,1,1), seasonal = c(1,1,1))
+fit4 <- arima(tempdata_train, order = c(1,1,1), seasonal = c(1,1,1))
+
+# The model which returns the lowest AIC score is (0,1,1) (0,1,1)
+# Run this best model again on training set
+best_md <- arima(tempdata_train, order = c(0,1,1), seasonal = list(order = c(0,1,1)))
+
+
+# Use auto arima function to find a good performing model
+auto_md <- auto.arima(tempdata_train, ic="aic", max.order=6, D=1, d=1, stepwise=FALSE, approximation=FALSE)
+auto_md
+
+# Check Residuals to see if it contains White Noise
+#checkresiduals(selected_md)
+checkresiduals(best_md)
+accuracy(best_md)
+#accuracy(selected_md)
+
+# Test the significance of the coefficients
+# coeftest(selected_md)
+
+
+# Use best model to forecast Test set for 24 periods (2 yrs)
+test_fc <- forecast(best_md, h = 24)
+
+# Display forecasted values
+#test_fc
+
+# Display Fitted, Actual and Forecasted values on same plot 
+test_forecast(actual = tempdata_ts, forecast.obj = test_fc, test = tempdata_test)
+  
+# Display metrics values (RMSE, MAE)
+accuracy(test_fc, tempdata_test)
+
+
+
+################################## END OF SARIMA MODEL #####################################
+
+
+#################################2. ETS MODEL ##############################################
+#stands for error, trend, seasonality
+#step 4
+etsmodel <- ets(tempdata_train)
+#plot graph for ets after training
+autoplot(etsmodel)
+
+#step 6
+#test for white noise in the ets model
+checkresiduals(etsmodel)
+
+#step 7
+#testing the accuracy
+accuracy(etsmodel)
+#giving out the summary of the data for ets model (same result)
+summary(etsmodel)
+
+test_fc_ets <- forecast(etsmodel, h = 24)
+test_forecast(actual = tempdata_ts, forecast.obj = test_fc_ets, test = tempdata_test)
+accuracy(test_fc_ets, tempdata_test)
+
+
+
+################################## END OF ETS MODEL ########################################
+
+#################################3. HOLT WINTERS - MULTIPLICATIVE MODEL ###################
+
+#fitting the Holt Winter Model
+hw_model <- HoltWinters(tempdata_train, seasonal = "multi")
+
+print(hw_model)
+
+checkresiduals(hw_model)
+
+# Compute in-sample accuracy by comparing fitted values with the training data
+#in_sample_accuracy <- accuracy(fitted(hw_model), tempdata_train)
+hw_modelf <- forecast(hw_model)
+in_sample_accuracy <- accuracy(hw_modelf)
+
+# Print the in-sample accuracy measures
+print(in_sample_accuracy)
+
+test_fc_hw_m <- forecast(hw_modelf, h = 24)
+test_forecast(actual = tempdata_ts, forecast.obj = test_fc_hw_m, test = tempdata_test)
+accuracy(test_fc_hw_m, tempdata_test)
+
+
+################################## END OF HOLT WINTERS - MULTIPLICATIVE MODEL #############
+
+
+
+################################ Coefficients of the Best Model ######################
+sel_best_md <- arima(tempdata_ts, order = c(0,1,1), seasonal = list(order = c(0,1,1), period=12))
+
+coeftest(sel_best_md)
+
+sel_best_test_fc <- forecast(best_md, h = 24)
+
+# Display Fitted, Actual and Forecasted values on same plot 
+test_forecast(actual = tempdata_ts, forecast.obj = sel_best_test_fc, test = tempdata_test)
+
+plot(forecast(best_md,h=24))
